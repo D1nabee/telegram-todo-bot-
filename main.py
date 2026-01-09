@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -42,16 +43,21 @@ def init_user(user_id):
     uid = str(user_id)
     if uid not in data:
         data[uid] = {
-            "recurring": [],      # daily tasks with time
-            "one_time": [],       # today's tasks
-            "long_term": [],      # goals with deadlines
-            "history": {},        # completion history
+            "recurring": [],
+            "one_time": [],
+            "long_term": [],
+            "history": {},
             "stats": {
                 "total_completed": 0,
                 "best_streak": 0
             }
         }
         save_data(data)
+
+# Validate time format
+def validate_time(time_str):
+    pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+    return re.match(pattern, time_str) is not None
 
 # Keyboards
 def main_keyboard():
@@ -75,41 +81,16 @@ def task_type_keyboard():
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 recurring (daily)", callback_data="type_recurring")],
         [InlineKeyboardButton(text="📌 one-time (today)", callback_data="type_onetime")],
-        [InlineKeyboardButton(text="🎯 long-term (deadline)", callback_data="type_longterm")],
+        [InlineKeyboardButton(text="🎯 long-term (goal)", callback_data="type_longterm")],
         [InlineKeyboardButton(text="« cancel", callback_data="back_to_main")]
     ])
     return kb
 
-def time_hours_keyboard():
-    buttons = []
-    for hour in range(0, 24, 3):
-        row = []
-        for h in range(hour, min(hour + 3, 24)):
-            row.append(InlineKeyboardButton(
-                text=f"{h:02d}:xx",
-                callback_data=f"hour_{h}"
-            ))
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="« cancel", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def time_minutes_keyboard(hour):
-    buttons = []
-    for minute in [0, 15, 30, 45]:
-        buttons.append([InlineKeyboardButton(
-            text=f"{hour:02d}:{minute:02d}",
-            callback_data=f"time_{hour:02d}:{minute:02d}"
-        )])
-    buttons.append([InlineKeyboardButton(text="« back", callback_data="select_hour")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def task_action_keyboard(task_id, task_type):
+def longterm_time_keyboard():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ done", callback_data=f"complete_{task_type}_{task_id}"),
-            InlineKeyboardButton(text="⏭ skip", callback_data=f"skip_{task_type}_{task_id}")
-        ],
-        [InlineKeyboardButton(text="🗑 delete", callback_data=f"delete_{task_type}_{task_id}")]
+        [InlineKeyboardButton(text="⏰ set time", callback_data="longterm_with_time")],
+        [InlineKeyboardButton(text="⏸ no time", callback_data="longterm_no_time")],
+        [InlineKeyboardButton(text="« cancel", callback_data="back_to_main")]
     ])
     return kb
 
@@ -126,6 +107,35 @@ def deadline_keyboard():
         [InlineKeyboardButton(text="« cancel", callback_data="back_to_main")]
     ])
     return kb
+
+def task_action_keyboard(task_id, task_type):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ done", callback_data=f"complete_{task_type}_{task_id}"),
+            InlineKeyboardButton(text="⏭ skip", callback_data=f"skip_{task_type}_{task_id}")
+        ],
+        [InlineKeyboardButton(text="🗑 delete", callback_data=f"delete_{task_type}_{task_id}")]
+    ])
+    return kb
+
+def task_list_keyboard(user_id, task_type, action="manage"):
+    uid = str(user_id)
+    keyboard = []
+    
+    tasks = data[uid][task_type]
+    
+    for i, task in enumerate(tasks):
+        time_str = f" `{task.get('time', '')}`" if task.get('time') else ""
+        deadline_str = f" `[{task.get('deadline', '')}]`" if task.get('deadline') else ""
+        
+        text = f"{i+1}. {task['name']}{time_str}{deadline_str}"
+        keyboard.append([InlineKeyboardButton(
+            text=text[:50],
+            callback_data=f"{action}_{task_type}_{i}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton(text="« back", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # Commands
 @dp.message(Command("start"))
@@ -175,57 +185,102 @@ async def receive_task_name(message: Message, state: FSMContext):
     task_type = state_data["task_type"]
     
     if task_type in ["recurring", "onetime"]:
-        await message.answer("select time:", reply_markup=time_hours_keyboard())
-    else:  # longterm
-        await message.answer("deadline?", reply_markup=deadline_keyboard())
-        await state.set_state(TaskStates.waiting_for_deadline)
+        # For recurring/one-time: time is mandatory
+        await message.answer(
+            "time?\n\n"
+            "format: `HH:MM`\n"
+            "example: `07:45` or `14:30`",
+            parse_mode="Markdown"
+        )
+        await state.set_state(TaskStates.waiting_for_time)
+    else:
+        # For long-term: ask if they want time or not
+        await message.answer(
+            "set reminder time?",
+            reply_markup=longterm_time_keyboard()
+        )
 
-@dp.callback_query(F.data == "select_hour")
-async def select_hour_again(callback: CallbackQuery):
-    await callback.message.edit_text("select time:", reply_markup=time_hours_keyboard())
+@dp.callback_query(F.data == "longterm_with_time")
+async def longterm_with_time(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "time?\n\n"
+        "format: `HH:MM`\n"
+        "example: `07:45` or `14:30`",
+        parse_mode="Markdown"
+    )
+    await state.update_data(longterm_has_time=True)
+    await state.set_state(TaskStates.waiting_for_time)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("hour_"))
-async def select_hour(callback: CallbackQuery):
-    hour = int(callback.data.replace("hour_", ""))
+@dp.callback_query(F.data == "longterm_no_time")
+async def longterm_no_time(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(longterm_has_time=False)
     await callback.message.edit_text(
-        f"select minutes for {hour:02d}:xx",
-        reply_markup=time_minutes_keyboard(hour)
+        "deadline?",
+        reply_markup=deadline_keyboard()
     )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("time_"))
-async def receive_time(callback: CallbackQuery, state: FSMContext):
-    time_str = callback.data.replace("time_", "")
-    state_data = await state.get_data()
+@dp.message(TaskStates.waiting_for_time)
+async def receive_time(message: Message, state: FSMContext):
+    time_str = message.text.strip()
     
-    user_id = str(callback.from_user.id)
+    if not validate_time(time_str):
+        await message.answer(
+            "invalid format.\n\n"
+            "use: `HH:MM`\n"
+            "example: `07:45` or `14:30`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Normalize time format (add leading zero if needed)
+    parts = time_str.split(":")
+    time_str = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+    
+    await state.update_data(task_time=time_str)
+    state_data = await state.get_data()
+    task_type = state_data["task_type"]
+    
+    if task_type == "longterm":
+        # Ask for deadline
+        await message.answer(
+            "deadline?",
+            reply_markup=deadline_keyboard()
+        )
+    else:
+        # Save recurring/onetime task
+        await save_task_with_time(message, state)
+
+async def save_task_with_time(message: Message, state: FSMContext):
+    state_data = await state.get_data()
+    user_id = str(message.from_user.id)
     task_type = state_data["task_type"]
     task_name = state_data["task_name"]
+    task_time = state_data["task_time"]
     
     new_task = {
         "name": task_name,
-        "time": time_str,
+        "time": task_time,
         "created": datetime.now().strftime("%Y-%m-%d"),
         "completed_today": False
     }
     
     if task_type == "recurring":
         data[user_id]["recurring"].append(new_task)
-        msg = f"recurring task added.\n`{task_name}` at `{time_str}` daily."
+        msg = f"recurring task added.\n\n`{task_name}`\ntime: `{task_time}` daily"
     else:  # onetime
         data[user_id]["one_time"].append(new_task)
-        msg = f"task added for today.\n`{task_name}` at `{time_str}`."
+        msg = f"task added for today.\n\n`{task_name}`\ntime: `{task_time}`"
     
     save_data(data)
     
-    await callback.message.edit_text(
+    await message.answer(
         msg,
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
     await state.clear()
-    await callback.answer()
 
 @dp.callback_query(F.data.startswith("deadline_"))
 async def receive_deadline(callback: CallbackQuery, state: FSMContext):
@@ -235,6 +290,8 @@ async def receive_deadline(callback: CallbackQuery, state: FSMContext):
     state_data = await state.get_data()
     user_id = str(callback.from_user.id)
     task_name = state_data["task_name"]
+    task_time = state_data.get("task_time")
+    has_time = state_data.get("longterm_has_time", False)
     
     new_task = {
         "name": task_name,
@@ -243,11 +300,17 @@ async def receive_deadline(callback: CallbackQuery, state: FSMContext):
         "completed": False
     }
     
+    if has_time and task_time:
+        new_task["time"] = task_time
+        time_info = f"\nreminder: `{task_time}` daily"
+    else:
+        time_info = "\nno reminders"
+    
     data[user_id]["long_term"].append(new_task)
     save_data(data)
     
     await callback.message.edit_text(
-        f"long-term goal added.\n`{task_name}`\ndeadline: `{deadline}`",
+        f"long-term goal added.\n\n`{task_name}`\ndeadline: `{deadline}`{time_info}",
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
@@ -260,18 +323,21 @@ async def show_today(callback: CallbackQuery):
     user_id = str(callback.from_user.id)
     init_user(callback.from_user.id)
     
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Combine recurring and one-time tasks for today
+    # Combine recurring and one-time tasks
     all_tasks = []
     
-    for i, task in enumerate(data[user_id]["recurring"]):
-        all_tasks.append((task["time"], "recurring", i, task))
+    for task in data[user_id]["recurring"]:
+        all_tasks.append((task["time"], task, "recurring"))
     
-    for i, task in enumerate(data[user_id]["one_time"]):
-        all_tasks.append((task["time"], "onetime", i, task))
+    for task in data[user_id]["one_time"]:
+        all_tasks.append((task["time"], task, "onetime"))
     
-    all_tasks.sort(key=lambda x: x[0])  # sort by time
+    # Add long-term with time
+    for task in data[user_id]["long_term"]:
+        if task.get("time") and not task.get("completed"):
+            all_tasks.append((task["time"], task, "longterm"))
+    
+    all_tasks.sort(key=lambda x: x[0])
     
     if not all_tasks:
         await callback.message.edit_text(
@@ -283,7 +349,7 @@ async def show_today(callback: CallbackQuery):
     
     msg = "*today's schedule:*\n\n"
     
-    for time, task_type, idx, task in all_tasks:
+    for time, task, task_type in all_tasks:
         status = "✅" if task.get("completed_today") else "⏸"
         msg += f"`{time}` {status} {task['name']}\n"
     
@@ -306,15 +372,19 @@ async def show_recurring(callback: CallbackQuery):
         await callback.answer()
         return
     
+    # Sort by time
+    tasks = sorted(data[user_id]["recurring"], key=lambda x: x["time"])
+    
     msg = "*recurring tasks:*\n\n"
     
-    for i, task in enumerate(data[user_id]["recurring"]):
-        msg += f"{i+1}. `{task['time']}` — {task['name']}\n"
+    for i, task in enumerate(tasks, 1):
+        status = "✅" if task.get("completed_today") else "⏸"
+        msg += f"{i}. `{task['time']}` {status} {task['name']}\n"
     
     await callback.message.edit_text(
         msg,
         parse_mode="Markdown",
-        reply_markup=main_keyboard()
+        reply_markup=task_list_keyboard(callback.from_user.id, "recurring", "manage_recurring")
     )
     await callback.answer()
 
@@ -332,19 +402,21 @@ async def show_longterm(callback: CallbackQuery):
     
     msg = "*long-term goals:*\n\n"
     
-    for i, task in enumerate(data[user_id]["long_term"]):
+    for i, task in enumerate(data[user_id]["long_term"], 1):
         status = "✅" if task.get("completed") else "⏳"
         days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
-        msg += f"{status} {task['name']}\n   `deadline: {task['deadline']}` ({days_left} days)\n\n"
+        time_info = f" `{task['time']}`" if task.get("time") else ""
+        
+        msg += f"{status} {task['name']}{time_info}\n   `{task['deadline']}` ({days_left} days)\n\n"
     
     await callback.message.edit_text(
         msg,
         parse_mode="Markdown",
-        reply_markup=main_keyboard()
+        reply_markup=task_list_keyboard(callback.from_user.id, "long_term", "manage_longterm")
     )
     await callback.answer()
 
-# Complete/Skip tasks
+# Complete/Skip/Delete tasks
 @dp.callback_query(F.data.startswith("complete_"))
 async def complete_task(callback: CallbackQuery):
     parts = callback.data.split("_")
@@ -357,7 +429,6 @@ async def complete_task(callback: CallbackQuery):
         task = data[user_id]["recurring"][task_id]
         task["completed_today"] = True
         
-        # Save to history
         if today not in data[user_id]["history"]:
             data[user_id]["history"][today] = {}
         data[user_id]["history"][today][task["name"]] = "done"
@@ -407,6 +478,41 @@ async def skip_task(callback: CallbackQuery):
     )
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_task(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    task_type = parts[1]
+    task_id = int(parts[2])
+    user_id = str(callback.from_user.id)
+    
+    if task_type == "recurring":
+        data[user_id]["recurring"].pop(task_id)
+    elif task_type == "onetime":
+        data[user_id]["one_time"].pop(task_id)
+    elif task_type == "longterm":
+        data[user_id]["long_term"].pop(task_id)
+    
+    save_data(data)
+    
+    await callback.message.edit_text(
+        "deleted.",
+        reply_markup=main_keyboard()
+    )
+    await callback.answer()
+
+# Manage task callbacks (for list interaction)
+@dp.callback_query(F.data.startswith("manage_"))
+async def manage_task(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    task_type = parts[1] if parts[1] != "recurring" else "recurring"
+    task_id = int(parts[2]) if len(parts) > 2 else int(parts[-1])
+    
+    await callback.message.edit_text(
+        "action?",
+        reply_markup=task_action_keyboard(task_id, task_type)
+    )
+    await callback.answer()
+
 # Stats
 @dp.callback_query(F.data == "show_stats")
 async def show_stats(callback: CallbackQuery):
@@ -414,8 +520,7 @@ async def show_stats(callback: CallbackQuery):
     
     total = data[user_id]["stats"]["total_completed"]
     
-    # Calculate today's completion
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Today's completion
     today_tasks = data[user_id]["recurring"] + data[user_id]["one_time"]
     completed_today = sum(1 for t in today_tasks if t.get("completed_today"))
     total_today = len(today_tasks)
@@ -427,7 +532,7 @@ async def show_stats(callback: CallbackQuery):
         f"✅ total completed: `{total}`\n"
         f"📋 today: `{completed_today}/{total_today}` ({completion_rate:.0f}%)\n"
         f"🔄 recurring habits: `{len(data[user_id]['recurring'])}`\n"
-        f"🎯 long-term goals: `{len(data[user_id]['long_term'])}`"
+        f"🎯 long-term goals: `{len([t for t in data[user_id]['long_term'] if not t.get('completed')])}`"
     )
     
     await callback.message.edit_text(
@@ -451,7 +556,6 @@ async def show_history(callback: CallbackQuery):
     
     msg = "*history (last 7 days):*\n\n"
     
-    # Get last 7 days
     for i in range(7):
         date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
         
@@ -479,46 +583,62 @@ async def send_reminders():
         today = now.strftime("%Y-%m-%d")
         
         for user_id, user_data in data.items():
-            # Check recurring tasks
-            for i, task in enumerate(user_data["recurring"]):
-                if task["time"] == current_time and not task.get("completed_today"):
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"*time.*\n\n{task['name']}",
-                            parse_mode="Markdown",
-                            reply_markup=task_action_keyboard(i, "recurring")
-                        )
-                    except:
-                        pass
-            
-            # Check one-time tasks
-            for i, task in enumerate(user_data["one_time"]):
-                if task["time"] == current_time:
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"*reminder.*\n\n{task['name']}",
-                            parse_mode="Markdown",
-                            reply_markup=task_action_keyboard(i, "onetime")
-                        )
-                    except:
-                        pass
+            try:
+                # Recurring tasks
+                for i, task in enumerate(user_data["recurring"]):
+                    if task["time"] == current_time and not task.get("completed_today"):
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"*time.*\n\n{task['name']}",
+                                parse_mode="Markdown",
+                                reply_markup=task_action_keyboard(i, "recurring")
+                            )
+                        except:
+                            pass
+                
+                # One-time tasks
+                for i, task in enumerate(user_data["one_time"]):
+                    if task["time"] == current_time:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"*reminder.*\n\n{task['name']}",
+                                parse_mode="Markdown",
+                                reply_markup=task_action_keyboard(i, "onetime")
+                            )
+                        except:
+                            pass
+                
+                # Long-term with time
+                for i, task in enumerate(user_data["long_term"]):
+                    if task.get("time") == current_time and not task.get("completed"):
+                        try:
+                            days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
+                            await bot.send_message(
+                                user_id,
+                                f"*reminder.*\n\n{task['name']}\n`{days_left} days left`",
+                                parse_mode="Markdown",
+                                reply_markup=task_action_keyboard(i, "longterm")
+                            )
+                        except:
+                            pass
+            except:
+                pass
         
-        # Reset "completed_today" at midnight
+        # Reset at midnight
         if current_time == "00:00":
             for user_id in data:
                 for task in data[user_id]["recurring"]:
                     task["completed_today"] = False
             save_data(data)
         
-        await asyncio.sleep(60)  # check every minute
+        await asyncio.sleep(60)
 
 # Main
 async def main():
-    print("execution v3.0 online.")
+    print("execution v3.1 online.")
     
-    # Start reminder system
     asyncio.create_task(send_reminders())
     
     await dp.start_polling(bot)
