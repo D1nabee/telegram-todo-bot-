@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import re
+import logging
+
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
@@ -1059,7 +1061,8 @@ async def manage_task(callback: CallbackQuery):
 
 # =======================
 # Stats / History / Settings
-# ======================
+# =======================
+
 
 @dp.callback_query(F.data == "show_stats")
 async def show_stats(callback: CallbackQuery):
@@ -1177,8 +1180,11 @@ async def send_reminders():
                             )
                             reminders_sent[key] = now
 
-            except Exception:
-                pass
+            except Exception as e:
+                logging.exception(
+                    f"Reminder error | user={user_id}"
+        )
+
 
         if current_time == "00:00":
             for user_data in data.values():
@@ -1205,3 +1211,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
