@@ -214,11 +214,26 @@ async def longterm_with_time(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "longterm_no_time")
 async def longterm_no_time(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(longterm_has_time=False)
+    # No time = just add to list without time and deadline
+    state_data = await state.get_data()
+    user_id = str(callback.from_user.id)
+    task_name = state_data["task_name"]
+    
+    new_task = {
+        "name": task_name,
+        "created": datetime.now().strftime("%Y-%m-%d"),
+        "completed": False
+    }
+    
+    data[user_id]["long_term"].append(new_task)
+    save_data(data)
+    
     await callback.message.edit_text(
-        "deadline?",
-        reply_markup=deadline_keyboard()
+        f"long-term goal added.\n\n`{task_name}`\nno reminders. no deadline.",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
     )
+    await state.clear()
     await callback.answer()
 
 @dp.message(TaskStates.waiting_for_time)
@@ -234,7 +249,7 @@ async def receive_time(message: Message, state: FSMContext):
         )
         return
     
-    # Normalize time format (add leading zero if needed)
+    # Normalize time format
     parts = time_str.split(":")
     time_str = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
     
@@ -291,26 +306,20 @@ async def receive_deadline(callback: CallbackQuery, state: FSMContext):
     user_id = str(callback.from_user.id)
     task_name = state_data["task_name"]
     task_time = state_data.get("task_time")
-    has_time = state_data.get("longterm_has_time", False)
     
     new_task = {
         "name": task_name,
         "deadline": deadline,
+        "time": task_time,
         "created": datetime.now().strftime("%Y-%m-%d"),
         "completed": False
     }
-    
-    if has_time and task_time:
-        new_task["time"] = task_time
-        time_info = f"\nreminder: `{task_time}` daily"
-    else:
-        time_info = "\nno reminders"
     
     data[user_id]["long_term"].append(new_task)
     save_data(data)
     
     await callback.message.edit_text(
-        f"long-term goal added.\n\n`{task_name}`\ndeadline: `{deadline}`{time_info}",
+        f"long-term goal added.\n\n`{task_name}`\ndeadline: `{deadline}`\nreminder: `{task_time}` daily",
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
@@ -404,10 +413,15 @@ async def show_longterm(callback: CallbackQuery):
     
     for i, task in enumerate(data[user_id]["long_term"], 1):
         status = "✅" if task.get("completed") else "⏳"
-        days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
         time_info = f" `{task['time']}`" if task.get("time") else ""
         
-        msg += f"{status} {task['name']}{time_info}\n   `{task['deadline']}` ({days_left} days)\n\n"
+        if task.get("deadline"):
+            days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
+            deadline_info = f"\n   `{task['deadline']}` ({days_left} days)"
+        else:
+            deadline_info = "\n   no deadline"
+        
+        msg += f"{status} {task['name']}{time_info}{deadline_info}\n\n"
     
     await callback.message.edit_text(
         msg,
@@ -500,7 +514,7 @@ async def delete_task(callback: CallbackQuery):
     )
     await callback.answer()
 
-# Manage task callbacks (for list interaction)
+# Manage task callbacks
 @dp.callback_query(F.data.startswith("manage_"))
 async def manage_task(callback: CallbackQuery):
     parts = callback.data.split("_")
@@ -614,13 +628,21 @@ async def send_reminders():
                 for i, task in enumerate(user_data["long_term"]):
                     if task.get("time") == current_time and not task.get("completed"):
                         try:
-                            days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
-                            await bot.send_message(
-                                user_id,
-                                f"*reminder.*\n\n{task['name']}\n`{days_left} days left`",
-                                parse_mode="Markdown",
-                                reply_markup=task_action_keyboard(i, "longterm")
-                            )
+                            if task.get("deadline"):
+                                days_left = (datetime.strptime(task["deadline"], "%Y-%m-%d") - datetime.now()).days
+                                await bot.send_message(
+                                    user_id,
+                                    f"*reminder.*\n\n{task['name']}\n`{days_left} days left`",
+                                    parse_mode="Markdown",
+                                    reply_markup=task_action_keyboard(i, "longterm")
+                                )
+                            else:
+                                await bot.send_message(
+                                    user_id,
+                                    f"*reminder.*\n\n{task['name']}",
+                                    parse_mode="Markdown",
+                                    reply_markup=task_action_keyboard(i, "longterm")
+                                )
                         except:
                             pass
             except:
@@ -637,7 +659,7 @@ async def send_reminders():
 
 # Main
 async def main():
-    print("execution v3.1 online.")
+    print("execution v3.2 online.")
     
     asyncio.create_task(send_reminders())
     
